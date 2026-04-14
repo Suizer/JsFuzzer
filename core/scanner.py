@@ -1,9 +1,10 @@
 """
-core/scanner.py — Motor de análisis estático para JS (v3 — Surgical)
+core/scanner.py — Motor de análisis estático para JS (v4 — Secrets-First)
 
-Cambios vs v2:
-  - Sink filtering: elimina Function constructor FPs (isFunction checks),
-    setTimeout con callback refs (no string), y sinks dentro de frameworks conocidos.
+Cambios vs v3:
+  - ELIMINADO: Toda la detección de sinks (eval, innerHTML, Function, setTimeout, etc.)
+    Razón: Sin taint analysis, los sinks son ruido informativo no accionable.
+  - MANTENIDO: Secrets, Entropy, Endpoints, Frameworks — hallazgos confirmados y accionables.
   - Entropy filtering: mata i18n keys, CSS properties, template literals,
     dotted.key.paths, y strings que son claramente texto humano.
   - URL filtering: ignora W3C namespaces, license/docs URLs, SVG data URIs,
@@ -88,19 +89,6 @@ _ENTROPY_NOISE_PATTERNS = re.compile(
     r")",
 )
 
-# Sink: Function constructor false positives
-_FUNCTION_CONSTRUCTOR_FP = re.compile(
-    r"(?:"
-    r"isFunction\s*\("
-    r"|typeof\s+\w+\s*===?\s*[\"']function"
-    r"|\.isFunction\b"
-    r")",
-)
-
-# setTimeout: solo string argument es sink real
-_SETTIMEOUT_STRING_ONLY = re.compile(
-    r"setTimeout\s*\(\s*[\"'`]"
-)
 
 # ─── Framework signatures ────────────────────────────────────────────────────
 
@@ -133,13 +121,12 @@ _FRAMEWORK_SIGNATURES = {
 
 
 class JScanner:
-    """Motor de escaneo estático v3 — Surgical precision."""
+    """Motor de escaneo estático v4 — Secrets-first, zero sink noise."""
 
     def __init__(self, config_dir: str = "config"):
         self.config_dir = Path(config_dir)
         self.rules = self._load_rules()
 
-        self._compiled_sinks = self._compile_group("sinks", "sinks")
         self._compiled_secrets = self._compile_secrets()
         self._compiled_endpoints = self._compile_endpoints()
         self._compiled_frameworks = self._compile_frameworks()
@@ -156,7 +143,7 @@ class JScanner:
 
     def _load_rules(self) -> dict:
         rules = {}
-        for config_name in ("secrets.yaml", "sinks.yaml", "endpoints.yaml"):
+        for config_name in ("secrets.yaml", "endpoints.yaml"):
             config_path = self.config_dir / config_name
             if config_path.exists():
                 with open(config_path, "r", encoding="utf-8") as f:
@@ -167,22 +154,6 @@ class JScanner:
         return rules
 
     # ─── Regex Pre-compilation ───────────────────────────────────────────
-
-    def _compile_group(self, rule_key: str, list_key: str) -> list[dict]:
-        compiled = []
-        items = self.rules.get(rule_key, {}).get(list_key, [])
-        if not items:
-            return compiled
-        for item in items:
-            patterns = []
-            for p in item.get("patterns", []):
-                try:
-                    patterns.append(re.compile(p))
-                except re.error as e:
-                    console.print(f"[warning]Regex inválido en {item['name']}: {e}[/warning]")
-            if patterns:
-                compiled.append({**item, "_compiled": patterns})
-        return compiled
 
     def _compile_secrets(self) -> list[dict]:
         compiled = []
@@ -239,7 +210,6 @@ class JScanner:
         line_starts = self._build_line_index(content)
         findings: list[dict] = []
 
-        findings.extend(self._scan_sinks(content, line_starts))
         findings.extend(self._scan_secrets(content, line_starts))
         if self._entropy_enabled:
             findings.extend(self._scan_entropy(content, line_starts))
@@ -247,43 +217,6 @@ class JScanner:
         findings.extend(self._detect_frameworks(content))
         findings = self._deduplicate(findings)
         return findings
-
-    # ─── Scan: Sinks (con filtrado contextual) ───────────────────────────
-
-    def _scan_sinks(self, content: str, line_starts: list[int]) -> list[dict]:
-        results = []
-        for sink in self._compiled_sinks:
-            sink_name = sink["name"]
-
-            for regex in sink["_compiled"]:
-                for match in regex.finditer(content):
-                    ctx_window = self._get_raw_context(content, match.start(), 40, 40)
-
-                    # Function constructor: filtrar isFunction() type-checks
-                    if sink_name == "Function constructor":
-                        if _FUNCTION_CONSTRUCTOR_FP.search(ctx_window):
-                            continue
-
-                    # setTimeout/setInterval: solo string arg es sink
-                    if sink_name == "setTimeout with string":
-                        local = content[match.start():min(len(content), match.start() + 30)]
-                        if not _SETTIMEOUT_STRING_ONLY.match(local):
-                            continue
-
-                    if sink_name == "setInterval with string":
-                        local = content[match.start():min(len(content), match.start() + 30)]
-                        if not re.match(r"setInterval\s*\(\s*[\"'`]", local):
-                            continue
-
-                    results.append({
-                        "type": "SINK",
-                        "name": sink_name,
-                        "severity": sink["severity"],
-                        "category": sink.get("category", ""),
-                        "line": self._get_line_number(line_starts, match.start()),
-                        "context": self._get_context(content, match.start(), match.end()),
-                    })
-        return results
 
     # ─── Scan: Secrets ───────────────────────────────────────────────────
 

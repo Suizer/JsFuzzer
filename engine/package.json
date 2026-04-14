@@ -1,0 +1,16 @@
+{
+  "name": "js-pentest-ast-engine",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Babel AST deobfuscation engine for JS-Pentest-Automator",
+  "main": "transformer.js",
+  "scripts": {
+    "deobfuscate": "node transformer.js"
+  },
+  "dependencies": {
+    "@babel/parser": "^7.24.0",
+    "@babel/traverse": "^7.24.0",
+    "@babel/generator": "^7.24.0",
+    "@babel/types": "^7.24.0"
+  }
+}

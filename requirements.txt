@@ -1,0 +1,9 @@
+requests>=2.31.0
+jsbeautifier>=1.15.1
+rich>=13.7.0
+pyyaml>=6.0.1
+colorama>=0.4.6
+anthropic==0.21.3
+PyGithub==2.1.1
+python-dotenv==1.0.1
+esprima==4.0.1  # o tree-sitter, dependiendo de tu preferencia para el AST

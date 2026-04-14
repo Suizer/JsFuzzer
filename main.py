@@ -31,7 +31,7 @@ from core.downloader import download_js_file
 from core.map import unpack_map
 from core.reporter import build_report          # ← Reporter Rich nativo
 from core.scanner import JScanner
-
+from core.url_sanitizer import sanitize_js_urls, get_sanitize_stats
 # ─── UI ───────────────────────────────────────────────────────────────────────
 
 PENTEST_THEME = Theme({

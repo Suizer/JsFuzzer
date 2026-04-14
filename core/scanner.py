@@ -1,16 +1,17 @@
 """
-core/scanner.py — Motor de análisis estático para JS (v4 — Secrets-First)
+core/scanner.py — Motor de análisis estático para JS (v5 — Precision)
 
-Cambios vs v3:
-  - ELIMINADO: Toda la detección de sinks (eval, innerHTML, Function, setTimeout, etc.)
-    Razón: Sin taint analysis, los sinks son ruido informativo no accionable.
-  - MANTENIDO: Secrets, Entropy, Endpoints, Frameworks — hallazgos confirmados y accionables.
-  - Entropy filtering: mata i18n keys, CSS properties, template literals,
-    dotted.key.paths, y strings que son claramente texto humano.
-  - URL filtering: ignora W3C namespaces, license/docs URLs, SVG data URIs,
-    framework error references, y CDN polyfill URLs.
-  - Subdomain filtering: elimina FPs de config filenames (cs-CZ_dev-xxx.js),
-    SDK internals (Kameleoon.API.Events), y environment detection strings.
+Cambios vs v4:
+  - Entropy: filtro quirúrgico contra código minificado (Salesforce Aura/LWC,
+    event handlers, DOM APIs, framework internals). El 95% de los ENTROPY FPs
+    del reporte Lidl eran strings de código minificado con keywords como
+    "keydown", "keyCode", "addEventListener", "getCallback" — NO secretos.
+  - Entropy: nuevo filtro de "code smell" — si un string contiene >=3 tokens
+    de código JS (function, return, var, this, if, else, etc.), se descarta.
+  - URL noise: filtros ampliados para salesforce.com schemas, reactjs.org,
+    nextjs.org docs, momentjs.com, ckeditor.com, youtube.com embeds,
+    googleapis.com (excepto APIs activas), gstatic.com, Google SDK URLs.
+  - Subdomain noise: filtros para salesforce.com internals.
 
 Thread-safe: instancia read-only después de __init__. scan_file() no muta estado.
 """
@@ -41,18 +42,75 @@ def _shannon_entropy(data: str) -> float:
 
 # ─── Noise Filters (compilados una sola vez) ─────────────────────────────────
 
-# URLs que son ruido: W3C namespaces, licenses, framework docs, SVG/XML schemas
+# URLs que son ruido: framework docs, schemas, CDNs, error pages
 _URL_NOISE_PATTERNS = re.compile(
     r"(?:"
     r"w3\.org/"
     r"|polymer\.github\.io/"
-    r"|vuejs\.org/error-reference"
+    r"|vuejs\.org/"
+    r"|reactjs\.org/"
+    r"|react\.dev/"
+    r"|nextjs\.org/"
+    r"|momentjs\.com/"
+    r"|ckeditor\.com/"
     r"|github\.com/[a-zA-Z-]+/[a-zA-Z-]+(?:/issues|/blob|#)"
     r"|bit\.ly/"
     r"|schema\.org"
     r"|iframe-resizer\.com/"
     r"|googleapis\.com/css"
     r"|cdnjs\.cloudflare\.com/"
+    r"|fb\.me/"
+    r"|err\.47ng\.com/"
+    r"|salesforce\.com/charts/"
+    r"|json-schema\.org/"
+    r"|lwc\.dev/"
+    r"|sfdc\.co/"
+    r"|unpkg\.com/"
+    r"|cdn\.jsdelivr\.net/"
+    r"|gstatic\.com/"
+    r"|youtube\.com/iframe_api"
+    r"|youtube\.com/embed/"
+    r"|youtube\.com/subscribe"
+    r"|google-analytics\.com/"
+    r"|googletagmanager\.com/"
+    r"|accounts\.google\.com/o/oauth2"
+    r"|plus\.google\.com"
+    r"|plus\.googleapis\.com"
+    r"|play\.google\.com/"
+    r"|classroom\.google\.com/"
+    r"|families\.google\.com/"
+    r"|workspace\.google\.com/"
+    r"|drive\.google\.com/"
+    r"|pay\.google\.com/"
+    r"|talkgadget\.google\.com/"
+    r"|clients3\.google\.com/"
+    r"|apis\.google\.com/"
+    r"|www\.google\.com/shopping/"
+    r"|dataconnector\.corp\.google\.com/"
+    r"|apache\.org/licenses"
+    r"|lightningdesignsystem\.com/"
+    r"|ct\.de/"
+    r"|cke4\.ckeditor\.com/"
+    r"|yarnpkg\.com/"
+    r"|facebook\.com/sharer"
+    r"|twitter\.com/intent"
+    r"|x\.com/intent"
+    r"|linkedin\.com/shareArticle"
+    r"|pinterest\.com/pin/"
+    r"|reddit\.com/submit"
+    r"|t\.me/share"
+    r"|tumblr\.com/widgets"
+    r"|vk\.com/share"
+    r"|xing\.com/spi"
+    r"|buffer\.com/add"
+    r"|getpocket\.com/save"
+    r"|stumbleupon\.com/submit"
+    r"|flipboard\.com/bookmarklet"
+    r"|diasporafoundation\.org/"
+    r"|addthis\.com/"
+    r"|weibo\.com/share"
+    r"|qzone\.qq\.com/"
+    r"|lidlplus\.com/"
     r")",
     re.IGNORECASE,
 )
@@ -66,6 +124,9 @@ _SUBDOMAIN_NOISE_PATTERNS = re.compile(
     r"|\.API\."
     r"|\.runWhenElementPresent"
     r"|new URL\("
+    r"|api\.salesforce\.com"
+    r"|api\.reciteme\.com"
+    r"|dev\.virtualearth\.net"
     r")",
     re.IGNORECASE,
 )
@@ -86,6 +147,49 @@ _ENTROPY_NOISE_PATTERNS = re.compile(
     r"|viewBox=|xmlns="
     r"|\\u[0-9a-fA-F]{4}"
     r"|%[0-9a-fA-F]{2}"
+    r")",
+)
+
+# Entropy: tokens de código JS — si un string tiene >=3 de estos, es código no secreto
+_CODE_TOKENS = re.compile(
+    r"\b(?:"
+    r"function|return|var|let|const|this|if|else|for|while|switch|case|break"
+    r"|throw|catch|try|new|typeof|instanceof|void|delete|null|undefined|true|false"
+    r"|document|window|console|addEventListener|removeEventListener|createElement"
+    r"|getAttribute|setAttribute|appendChild|removeChild|querySelector"
+    r"|indexOf|substring|toString|prototype|hasOwnProperty"
+    r"|\.push|\.pop|\.shift|\.splice|\.slice|\.map|\.filter|\.reduce|\.forEach"
+    r"|\.length|\.split|\.join|\.replace|\.match|\.test|\.exec"
+    r"|\.get\(|\.set\(|\.add\(|\.has\("
+    r"|keyCode|keydown|keyup|keypress|click|focus|blur|mouseover|mousedown"
+    r"|preventDefault|stopPropagation|getCallback|fireEvent"
+    r"|getParam|setParam|getComponent|getElement|getReference"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Entropy: patrones de código minificado → no secreto
+_MINIFIED_CODE_PATTERNS = re.compile(
+    r"(?:"
+    r"===?\s*[\"']"
+    r"|!==?\s*[\"']"
+    r"|\(\s*function"
+    r"|\.prototype\."
+    r"|\.call\(|\.apply\("
+    r"|\.bind\("
+    r"|=>\s*\{"
+    r"|\?\s*\w+\s*:"
+    r"|&&\s*\w+|[\|]{2}\s*\w+"
+    r"|\\x3d|\\x3e|\\x3c"
+    r"|aura://"
+    r"|markup://"
+    r"|\$A\.util\."
+    r"|\$A\.get\("
+    r"|getEvt\("
+    r"|metricsService"
+    r"|force_record"
+    r"|RecordTemplate"
+    r"|MetadataStore"
     r")",
 )
 
@@ -117,11 +221,15 @@ _FRAMEWORK_SIGNATURES = {
     "Nuxt": [
         r"__NUXT__", r"nuxt:reload", r"\bnuxt\b.*\bplugin\b",
     ],
+    "Salesforce Aura/LWC": [
+        r"\$A\.", r"aura://", r"markup://", r"lightning-",
+        r"__AURA__", r"Aura\.Component",
+    ],
 }
 
 
 class JScanner:
-    """Motor de escaneo estático v4 — Secrets-first, zero sink noise."""
+    """Motor de escaneo estático v5 — Precision-grade secret & endpoint detection."""
 
     def __init__(self, config_dir: str = "config"):
         self.config_dir = Path(config_dir)
@@ -236,7 +344,7 @@ class JScanner:
                 })
         return results
 
-    # ─── Scan: Entropy (quirúrgico) ──────────────────────────────────────
+    # ─── Scan: Entropy (quirúrgico v2) ───────────────────────────────────
 
     def _scan_entropy(self, content: str, line_starts: list[int]) -> list[dict]:
         results = []
@@ -258,44 +366,64 @@ class JScanner:
             if any(skip.match(value) for skip in self._entropy_skip):
                 continue
 
-            # URLs, paths, data URIs
+            # ── Fast-path exclusions ─────────────────────────────────────
             if value.startswith(("http://", "https://", "/", "./", "../", "data:")):
                 continue
-
-            # Texto humano
             if " " in value:
                 continue
-
-            # i18n, CSS, SVG, templates
             if _ENTROPY_NOISE_PATTERNS.search(value):
                 continue
-
-            # Dotted i18n keys: pages.checkout.delivery.title
             if value.count(".") >= 3 and all(c.isalnum() or c in "._-" for c in value):
                 continue
-
-            # CSS blocks
             if "{" in value and "}" in value and (":" in value or ";" in value):
                 continue
-
-            # Template literals
             if "${" in value:
                 continue
 
+            # ── Code-smell detection (NEW v5) ────────────────────────────
+            if _MINIFIED_CODE_PATTERNS.search(value):
+                continue
+
+            code_token_count = len(_CODE_TOKENS.findall(value))
+            if code_token_count >= 3:
+                continue
+
+            # Context check: code-like chars + minified context = skip
+            ctx_wide = self._get_raw_context(content, match.start(), 120, 120)
+            if _MINIFIED_CODE_PATTERNS.search(ctx_wide):
+                if any(c in value for c in "(){}[];=<>!&|"):
+                    continue
+
+            # ── Entropy calculation ──────────────────────────────────────
             entropy = _shannon_entropy(value)
             if entropy < threshold:
                 continue
 
-            # Context keywords que indican un secreto real
+            # Secret-context keywords
             ctx_around = self._get_raw_context(content, match.start(), 60, 10).lower()
             has_secret_context = any(kw in ctx_around for kw in (
                 "key", "secret", "token", "password", "passwd", "apikey",
                 "api_key", "auth", "credential", "private", "bearer",
             ))
 
-            # Sin contexto de secreto → threshold más alto para cortar ruido
-            if not has_secret_context and entropy < 5.0:
+            # Stricter threshold without secret context (v5: 5.0 → 5.5)
+            if not has_secret_context and entropy < 5.5:
                 continue
+
+            # Framework-context killer: Salesforce/Aura/DOM code = not a secret
+            if not has_secret_context:
+                if any(fw in ctx_around for fw in (
+                    "$a.", "aura://", "markup://", "getparam", "setparam",
+                    "getcallback", "getelement", "getcomponent", "fireevent",
+                    "addeventlistener", "removeeventlistener", "keydown",
+                    "keyup", "keycode", "keypress", "metricsservice",
+                    "force_record", "recordtemplate", "metadatastore",
+                    "descriptor", "controller", "action$",
+                    "regexp(", "\\x3d", "\\x3e",
+                    "createelement", "appendchild", "queryselector",
+                    "classlist", "setattribute", "getattribute",
+                )):
+                    continue
 
             results.append({
                 "type": "ENTROPY",
@@ -329,12 +457,10 @@ class JScanner:
                 for match in regex.finditer(content):
                     matched_value = match.group(0)
 
-                    # URLs: filtrar ruido
                     if rule_name == "Absolute URL":
                         if _URL_NOISE_PATTERNS.search(matched_value):
                             continue
 
-                    # Subdominios: filtrar config files y SDK internals
                     if rule_name == "Subdomain reference":
                         ctx_around = self._get_raw_context(content, match.start(), 30, 30)
                         if _SUBDOMAIN_NOISE_PATTERNS.search(ctx_around):
@@ -390,7 +516,6 @@ class JScanner:
 
     @staticmethod
     def _get_raw_context(content: str, index: int, before: int, after: int) -> str:
-        """Contexto sin sanitizar — para uso interno en filtros."""
         start = max(0, index - before)
         end = min(len(content), index + after)
         return content[start:end]

@@ -1,0 +1,8 @@
+# Ignorar una carpeta específica
+output/
+
+# Recomendados para tu Mac y Python
+.DS_Store
+__pycache__/
+*.pyc
+.venv/

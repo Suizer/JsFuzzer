@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
-
+from core.url_sanitizer import sanitize_js_urls, get_sanitize_stats
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn
@@ -242,11 +242,8 @@ def run_ingestion_pipeline(url: str, workers: int = MAX_WORKERS):
     if not js_urls:
         console.print("[warning]⚠ No se encontraron URLs JS. Abortando.[/warning]")
         return
-    clean_urls = sanitize_js_urls(js_urls)
-    stats = get_sanitize_stats(js_urls, clean_urls)
-    console.print(f"[info]URL Sanitizer: {stats['original_count']} → {stats['cleaned_count']} "
-    f"({stats['removed_count']} fantasmas eliminadas, -{stats['reduction_pct']}%)[/info]")
-    process_js_queue(clean_urls, output_dir, workers=workers)
+
+    process_js_queue(js_urls, output_dir, workers)
 
 
 def run_katana_crawler(url: str) -> set[str]:

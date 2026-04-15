@@ -23,6 +23,7 @@ from rich.rule import Rule
 from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
+from urllib.parse import urlparse
 
 # ─── Paleta semántica ────────────────────────────────────────────────────────
 
@@ -212,7 +213,7 @@ def _render_finding(console: Console, f: dict, idx: int, total: int) -> None:
     # Contexto
     if ctx:
         prefix = "  │    " if idx < total - 1 else "       "
-        ctx_display = ctx[:180] + ("…" if len(ctx) > 180 else "")
+        ctx_display = ctx[:140] + ("…" if len(ctx) > 140 else "")
         console.print(f"{prefix}[dim white]{ctx_display}[/dim white]")
 
     console.print()
@@ -257,18 +258,36 @@ def _render_file_block(console: Console, result) -> None:
     console.print()
 
 
-def _render_errors(console: Console, results: list) -> None:
+def _render_errors(console: Console, results: list, full: bool = False) -> None:
     failed = [r for r in results if not r.success]
     if not failed:
         return
 
     console.print(Rule("[sev.high]FAILED DOWNLOADS[/sev.high]", style="red"))
     console.print()
+
+    if full:
+        for r in failed:
+            console.print(f"  [sev.high]✗[/sev.high]  [dim white]{r.url}[/dim white]")
+            if r.error:
+                console.print(f"     [dim white]{r.error}[/dim white]")
+        console.print()
+        return
+
+    domain_groups: dict[str, list] = {}
     for r in failed:
-        console.print(f"  [sev.high]✗[/sev.high]  [dim white]{r.url}[/dim white]")
-        if r.error:
-            console.print(f"     [dim white]{r.error}[/dim white]")
-    console.print()
+        domain = urlparse(r.url).netloc or r.url
+        domain_groups.setdefault(domain, []).append(r)
+
+    for domain, entries in sorted(domain_groups.items(), key=lambda item: -len(item[1])):
+        console.print(f"  [sev.high]{len(entries)} failed[/sev.high]  [dim white]{domain}[/dim white]")
+        for r in entries[:5]:
+            console.print(f"    [dim white]{r.url}[/dim white]")
+            if r.error:
+                console.print(f"       [dim white]{r.error}[/dim white]")
+        if len(entries) > 5:
+            console.print(f"    [muted]…{len(entries) - 5} more failed URLs[/muted]")
+        console.print()
 
 
 # ─── Entry point ─────────────────────────────────────────────────────────────
@@ -301,7 +320,7 @@ def build_report(results: list, output_dir: Path) -> Path:
         if result.success and result.findings:
             _render_file_block(screen_console, result)
 
-    _render_errors(screen_console, results)
+    _render_errors(screen_console, results, full=False)
 
     # Footer
     critical_total = sum(1 for f in all_findings if f["severity"].upper() == "CRITICAL")
@@ -335,7 +354,7 @@ def build_report(results: list, output_dir: Path) -> Path:
         if result.success and result.findings:
             _render_file_block(file_console, result)
 
-    _render_errors(file_console, results)
+    _render_errors(file_console, results, full=True)
     file_console.file.close()
 
     return report_path

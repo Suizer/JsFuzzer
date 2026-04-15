@@ -168,6 +168,19 @@ _CODE_TOKENS = re.compile(
     re.IGNORECASE,
 )
 
+# Charsets conocidos con alta entropía que NO son secretos
+_KNOWN_CHARSETS = frozenset({
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
+    "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+    "0123456789abcdef",
+    "0123456789abcdefABCDEF",
+    "0123456789abcdefghijklmnopqrstuvwxyz",
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=",
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_=",
+})
+
 # Entropy: patrones de código minificado → no secreto
 _MINIFIED_CODE_PATTERNS = re.compile(
     r"(?:"
@@ -373,6 +386,9 @@ class JScanner:
                 continue
             if _ENTROPY_NOISE_PATTERNS.search(value):
                 continue
+            # ── Known charset filter (v5.1) ────────────────────────────
+            if value in _KNOWN_CHARSETS:
+                continue
             if value.count(".") >= 3 and all(c.isalnum() or c in "._-" for c in value):
                 continue
             if "{" in value and "}" in value and (":" in value or ";" in value):
@@ -490,7 +506,9 @@ class JScanner:
         results = []
         for name, patterns in self._compiled_frameworks.items():
             hit_count = sum(1 for regex in patterns if regex.search(content))
-            if hit_count >= 2:
+            # v5.1: threshold mínimo 3 o 50% de signatures para reducir FPs
+            min_hits = max(3, len(patterns) // 2)
+            if hit_count >= min_hits:
                 results.append({
                     "type": "FRAMEWORK",
                     "name": name,
@@ -540,11 +558,36 @@ class JScanner:
 
     @staticmethod
     def _deduplicate(findings: list[dict]) -> list[dict]:
+        """
+        Deduplicación inteligente (v5.1):
+        - Elimina duplicados exactos (mismo type:name:line)
+        - Cross-type: si ENDPOINT y URL caen en la misma línea,
+          ENDPOINT gana (es más específico para pentesting)
+        """
         seen: set[str] = set()
         unique: list[dict] = []
+
+        # Indexar líneas que ya tienen un ENDPOINT
+        endpoint_lines: set = set()
+        for f in findings:
+            if f["type"] == "ENDPOINT":
+                line = f.get("line", "")
+                if line != "N/A" and line != "":
+                    endpoint_lines.add(line)
+
         for f in findings:
             key = f"{f['type']}:{f['name']}:{f.get('line', '')}"
-            if key not in seen:
-                seen.add(key)
-                unique.append(f)
+            if key in seen:
+                continue
+
+            # URL en una línea que ya tiene ENDPOINT → redundante
+            line = f.get("line", "")
+            if (f["type"] == "URL"
+                    and f["name"] == "Absolute URL"
+                    and line in endpoint_lines):
+                continue
+
+            seen.add(key)
+            unique.append(f)
+
         return unique

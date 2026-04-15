@@ -11,6 +11,7 @@ Pipeline concurrente:
 """
 
 import argparse
+import datetime
 import select
 import subprocess
 import threading
@@ -78,12 +79,19 @@ scanner = JScanner()
 # ─── Core Functions ───────────────────────────────────────────────────────────
 
 def get_output_dir(url: str) -> Path:
-    """Genera estructura de directorios limpia basada en el dominio."""
+    """
+    Genera estructura de directorios con timestamp por escaneo.
+    Cada ejecución crea su propia carpeta dentro del dominio:
+    output/{domain}/{YYYY-MM-DD_HHMMSS}/
+    ├── js_files/
+    └── reports/
+    """
     domain = urlparse(url).netloc.replace(".", "_")
     if not domain:
         domain = "local_analysis"
 
-    base_path = Path(f"output/{domain}")
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    base_path = Path(f"output/{domain}/{timestamp}")
     (base_path / "js_files").mkdir(parents=True, exist_ok=True)
     (base_path / "reports").mkdir(parents=True, exist_ok=True)
 
@@ -283,7 +291,8 @@ def run_katana_crawler(url: str) -> set[str]:
 
 def run_local_analysis(js_dir: Path, workers: int = MAX_WORKERS):
     """Escanea archivos JS locales sin descargar."""
-    output_dir = Path("output/local_analysis")
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    output_dir = Path(f"output/local_analysis/{timestamp}")
     (output_dir / "js_files").mkdir(parents=True, exist_ok=True)
     (output_dir / "reports").mkdir(parents=True, exist_ok=True)
 

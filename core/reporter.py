@@ -63,7 +63,10 @@ TYPE_STYLE = {
  
  
 # ─── Helpers ──────────────────────────────────────────────────────────────────
- 
+def _classify_failed_url(url) -> str:
+    if not isinstance(url, str):
+        return "dato inválido (non-string URL)"
+    # ... resto igual 
 def _sev_badge(sev: str) -> Text:
     label = f" {SEV_ICON.get(sev, '·')} {sev} "
     t = Text(label, style=SEV_STYLE.get(sev, ""))

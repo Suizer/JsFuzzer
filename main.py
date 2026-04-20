@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-JS-Pentest-Automator — Recon Mode (v2.1)
+JS-Pentest-Automator — Recon Mode (v2.2)
 
 Pipeline concurrente:
   1. Ingesta de URLs (Katana / archivo / manual)
@@ -8,6 +8,11 @@ Pipeline concurrente:
   3. AST Deobfuscation pre-scan (paralelo, con fallback)
   4. Static Analysis: sinks, secrets, endpoints (paralelo)
   5. Reporte Rich en terminal + RECON_REPORT.txt (sin Markdown)
+
+v2.2 — Cambios:
+  - recon: ejecuta Katana directamente sin preguntar (zero-friction)
+  - local: pregunta por archivo Katana previo (única ruta donde tiene sentido)
+  - local: muestra la carpeta de output completa al finalizar
 """
 
 import argparse
@@ -32,7 +37,8 @@ from core.downloader import download_js_file
 from core.map import unpack_map
 from core.reporter import build_report          # ← Reporter Rich nativo
 from core.scanner import JScanner
-from core.url_sanitizer import sanitize_js_urls, get_sanitize_stats
+from core.url_sanitizer import sanitize_js_urls
+
 # ─── UI ───────────────────────────────────────────────────────────────────────
 
 PENTEST_THEME = Theme({
@@ -78,6 +84,13 @@ scanner = JScanner()
 
 # ─── Core Functions ───────────────────────────────────────────────────────────
 
+def _normalize_url(url: str) -> str:
+    """Asegura esquema HTTP/S para que urlparse() extraiga netloc correctamente."""
+    if not url.startswith(("http://", "https://")):
+        return "https://" + url
+    return url
+
+
 def get_output_dir(url: str) -> Path:
     """
     Genera estructura de directorios con timestamp por escaneo.
@@ -86,7 +99,7 @@ def get_output_dir(url: str) -> Path:
     ├── js_files/
     └── reports/
     """
-    domain = urlparse(url).netloc.replace(".", "_")
+    domain = urlparse(_normalize_url(url)).netloc.replace(".", "_")
     if not domain:
         domain = "local_analysis"
 
@@ -141,7 +154,6 @@ def process_single_js(url: str, output_dir: Path) -> FileResult:
                 sev = f["severity"].upper()
                 severity_counts[sev] = severity_counts.get(sev, 0) + 1
 
-            # Resaltar si hay críticos
             has_critical = "CRITICAL" in severity_counts
             sev_str = " | ".join(
                 f"{k}: {v}" for k, v in sorted(severity_counts.items())
@@ -173,7 +185,7 @@ def process_js_queue(js_urls: set, output_dir: Path, workers: int = MAX_WORKERS)
     console.print(Panel(
         f"[info]Pipeline: Download → AST → Scan → Report[/info]\n"
         f"[muted]{total} archivos | {workers} workers[/muted]",
-        title="[info]Recon Mode v2.1[/info]",
+        title="[info]Recon Mode v2.2[/info]",
         expand=False,
     ))
 
@@ -211,61 +223,35 @@ def process_js_queue(js_urls: set, output_dir: Path, workers: int = MAX_WORKERS)
     console.print(f"\n  [info]★[/info]  Reporte guardado → [bold white]{report_path}[/bold white]\n")
 
 
-# ─── Ingestion Pipeline ──────────────────────────────────────────────────────
-
-def run_ingestion_pipeline(url: str, workers: int = MAX_WORKERS):
-    """Orquesta: descubrimiento de URLs → cola de procesamiento."""
-    output_dir = get_output_dir(url)
-    console.print(f"[info]Target:[/info] {url}")
-
-    js_urls: set[str] = set()
-
-    # ── Lógica interactiva ───────────────────────────────────────────────
-    has_file = Confirm.ask("¿Tienes un archivo de salida de Katana previo?")
-
-    if has_file:
-        katana_file = Prompt.ask("Ruta al archivo Katana")
-        katana_path = Path(katana_file)
-        if katana_path.exists():
-            with open(katana_path) as f:
-                for line in f:
-                    line = line.strip()
-                    if line.endswith(".js"):
-                        js_urls.add(line)
-            console.print(f"[success]✓[/success] {len(js_urls)} URLs JS cargadas desde archivo")
-        else:
-            console.print("[critical]✗ Archivo no encontrado[/critical]")
-            return
-    else:
-        run_katana = Confirm.ask("¿Ejecutar Katana ahora?")
-        if run_katana:
-            js_urls = run_katana_crawler(url)
-        else:
-            manual = Prompt.ask("Pega URLs JS (separadas por coma o newline)")
-            for u in manual.replace(",", "\n").split("\n"):
-                u = u.strip()
-                if u:
-                    js_urls.add(u)
-
-    if not js_urls:
-        console.print("[warning]⚠ No se encontraron URLs JS. Abortando.[/warning]")
-        return
-    clean_urls = sanitize_js_urls(js_urls)
-    stats = get_sanitize_stats(js_urls, clean_urls)
-    console.print(f"[info]URL Sanitizer: {stats['original_count']} → {stats['cleaned_count']} "
-    f"({stats['removed_count']} fantasmas eliminadas, -{stats['reduction_pct']}%)[/info]")
-    process_js_queue(clean_urls, output_dir, workers=workers)
-
+# ─── Katana Runner ────────────────────────────────────────────────────────────
 
 def run_katana_crawler(url: str) -> set[str]:
-    """Ejecuta Katana y retorna URLs JS descubiertas."""
+    """
+    Ejecuta Katana restringido al dominio objetivo.
+
+    Flags de scope:
+      -fs fqdn  → sólo URLs cuyo host coincida exactamente con el del target
+                  (evita seguir CDNs, third-party scripts, analytics, etc.)
+    """
     js_urls: set[str] = set()
-    console.print(f"[info]Ejecutando Katana sobre {url}...[/info]")
+    normalized = _normalize_url(url)          # garantiza que tenga https://
+    target_domain = urlparse(normalized).netloc  # "qa.lidl.nl", "www.target.com", etc.
+
+    console.print(f"[info]Ejecutando Katana sobre {normalized}...[/info]")
+    console.print(f"[muted]Scope → {target_domain} (fqdn strict)[/muted]")
 
     try:
-        cmd = ["katana", "-u", url, "-jc", "-d", "3", "-silent"]
+        cmd = [
+            "katana",
+            "-u", normalized,  # Katana necesita URL con esquema
+            "-jc",             # JavaScript crawling
+            "-d", "3",         # profundidad máxima
+            "-fs", "fqdn",     # scope estricto: sólo el dominio exacto
+            "-silent",
+        ]
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
 
+        skipped_external = 0
         while True:
             ready = select.select([proc.stdout], [], [], 0.1)[0]
             if ready:
@@ -273,91 +259,197 @@ def run_katana_crawler(url: str) -> set[str]:
                 if not line:
                     break
                 line = line.strip()
-                if line.endswith(".js"):
-                    js_urls.add(line)
-                    safe_print(f"  [muted]→[/muted] {line}")
+                if not line.endswith(".js"):
+                    continue
+                # Segunda línea de defensa: filtro de dominio en Python
+                line_domain = urlparse(line).netloc
+                if line_domain and line_domain != target_domain:
+                    skipped_external += 1
+                    continue
+                js_urls.add(line)
+                safe_print(f"  [muted]→[/muted] {line}")
             elif proc.poll() is not None:
                 break
 
         proc.wait()
+
+        if skipped_external:
+            console.print(
+                f"[muted]  ↳ {skipped_external} URLs externas descartadas (out-of-scope)[/muted]"
+            )
+
     except FileNotFoundError:
         console.print("[critical]✗ Katana no encontrado en PATH[/critical]")
 
-    console.print(f"[success]✓[/success] Katana: {len(js_urls)} archivos JS descubiertos")
+    console.print(f"[success]✓[/success] Katana: {len(js_urls)} archivos JS en scope")
     return js_urls
+
+
+# ─── Ingestion Pipeline (Recon Mode) ─────────────────────────────────────────
+
+def run_ingestion_pipeline(url: str, workers: int = MAX_WORKERS):
+    """
+    Modo recon: ejecuta Katana directamente y procesa los JS descubiertos.
+    Sin preguntas redundantes — si elegiste recon, Katana corre automáticamente.
+    """
+    output_dir = get_output_dir(url)
+    console.print(f"[info]Target:[/info] {url}")
+    console.print(f"[info]Output:[/info] {output_dir.resolve()}\n")
+
+    # ── Katana directo (zero-friction) ───────────────────────────────────
+    js_urls = run_katana_crawler(url)
+
+    if not js_urls:
+        console.print("[warning]⚠ Katana no descubrió URLs JS. Abortando.[/warning]")
+        return
+
+    clean_urls, sanitize_stats = sanitize_js_urls(js_urls)
+    console.print(
+        f"[info]URL Sanitizer: {sanitize_stats['original_count']} → {sanitize_stats['cleaned_count']} "
+        f"({sanitize_stats['removed_count']} fantasmas eliminadas, -{sanitize_stats['reduction_pct']}%)[/info]"
+    )
+    process_js_queue(clean_urls, output_dir, workers=workers)
+
+    # ── Resumen de output ────────────────────────────────────────────────
+    console.print(Panel(
+        f"[success]Scan completo[/success]\n"
+        f"[muted]Output → {output_dir.resolve()}[/muted]",
+        title="[info]Done[/info]",
+        expand=False,
+    ))
 
 
 # ─── Local Analysis Mode ─────────────────────────────────────────────────────
 
 def run_local_analysis(js_dir: Path, workers: int = MAX_WORKERS):
-    """Escanea archivos JS locales sin descargar."""
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    output_dir = Path(f"output/local_analysis/{timestamp}")
-    (output_dir / "js_files").mkdir(parents=True, exist_ok=True)
-    (output_dir / "reports").mkdir(parents=True, exist_ok=True)
+    """
+    Modo local: escanea archivos JS desde disco.
 
-    js_files = list(js_dir.glob("**/*.js"))
-    if not js_files:
-        console.print("[warning]⚠ No se encontraron archivos .js[/warning]")
-        return
+    Ofrece dos opciones de ingesta:
+      1. Cargar un archivo de salida de Katana previo (URLs → download + scan)
+      2. Escanear directamente el directorio proporcionado (sin download)
+    """
+    # ── Preguntar si tiene output previo de Katana ───────────────────────
+    has_katana_file = Confirm.ask(
+        "[info]¿Tienes un archivo de salida de Katana previo para cargar URLs?[/info]"
+    )
 
-    console.print(f"[info]Modo local:[/info] {len(js_files)} archivos en {js_dir}")
+    if has_katana_file:
+        # ── Modo: archivo Katana → download remoto + scan ────────────────
+        katana_file = Prompt.ask("Ruta al archivo Katana")
+        katana_path = Path(katana_file)
 
-    results: list[FileResult] = []
+        if not katana_path.exists():
+            console.print("[critical]✗ Archivo no encontrado[/critical]")
+            return
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        MofNCompleteColumn(),
-        console=console,
-    ) as progress:
-        task = progress.add_task("Escaneando...", total=len(js_files))
+        js_urls: set[str] = set()
+        with open(katana_path) as f:
+            for line in f:
+                line = line.strip()
+                if line.endswith(".js"):
+                    js_urls.add(line)
 
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            def scan_local(fp: Path) -> FileResult:
-                r = FileResult(url=str(fp), filename=fp.name)
-                try:
-                    ast_result = deobfuscate(fp)
-                    r.ast_method = ast_result.method
-                    r.ast_stats = ast_result.stats
-                    r.findings = scanner.scan_file(fp) or []
-                    r.success = True
-                    if r.findings:
-                        safe_print(f"  [success]✓[/success] {fp.name} → {len(r.findings)} hallazgos")
-                    else:
-                        safe_print(f"  [muted]–[/muted] {fp.name} → limpio")
-                except Exception as e:
-                    r.error = str(e)
-                    safe_print(f"  [critical]✗ {fp.name}: {e}[/critical]")
-                return r
+        if not js_urls:
+            console.print("[warning]⚠ No se encontraron URLs .js en el archivo. Abortando.[/warning]")
+            return
 
-            futures = {executor.submit(scan_local, fp): fp for fp in js_files}
-            for future in as_completed(futures):
-                results.append(future.result())
-                progress.advance(task)
+        console.print(f"[success]✓[/success] {len(js_urls)} URLs JS cargadas desde archivo")
 
-    console.print()
-    report_path = build_report(results, output_dir)
-    console.print(f"\n  [info]★[/info]  Reporte guardado → [bold white]{report_path}[/bold white]\n")
+        # Necesitamos una URL base para el output dir — extraer del primer URL
+        sample_url = next(iter(js_urls))
+        output_dir = get_output_dir(sample_url)
+        console.print(f"[info]Output:[/info] {output_dir.resolve()}\n")
+
+        clean_urls, sanitize_stats = sanitize_js_urls(js_urls)
+        console.print(
+            f"[info]URL Sanitizer: {sanitize_stats['original_count']} → {sanitize_stats['cleaned_count']} "
+            f"({sanitize_stats['removed_count']} fantasmas eliminadas, -{sanitize_stats['reduction_pct']}%)[/info]"
+        )
+        process_js_queue(clean_urls, output_dir, workers=workers)
+
+    else:
+        # ── Modo: directorio local → scan directo (sin download) ─────────
+        if not js_dir.is_dir():
+            console.print(f"[critical]✗ No es un directorio válido: {js_dir}[/critical]")
+            return
+
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        output_dir = Path(f"output/local_analysis/{timestamp}")
+        (output_dir / "js_files").mkdir(parents=True, exist_ok=True)
+        (output_dir / "reports").mkdir(parents=True, exist_ok=True)
+
+        js_files = list(js_dir.glob("**/*.js"))
+        if not js_files:
+            console.print("[warning]⚠ No se encontraron archivos .js en el directorio[/warning]")
+            return
+
+        console.print(f"[info]Modo local:[/info] {len(js_files)} archivos en {js_dir.resolve()}")
+        console.print(f"[info]Output:[/info] {output_dir.resolve()}\n")
+
+        results: list[FileResult] = []
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("Escaneando...", total=len(js_files))
+
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                def scan_local(fp: Path) -> FileResult:
+                    r = FileResult(url=str(fp), filename=fp.name)
+                    try:
+                        ast_result = deobfuscate(fp)
+                        r.ast_method = ast_result.method
+                        r.ast_stats = ast_result.stats
+                        r.findings = scanner.scan_file(fp) or []
+                        r.success = True
+                        if r.findings:
+                            safe_print(f"  [success]✓[/success] {fp.name} → {len(r.findings)} hallazgos")
+                        else:
+                            safe_print(f"  [muted]–[/muted] {fp.name} → limpio")
+                    except Exception as e:
+                        r.error = str(e)
+                        safe_print(f"  [critical]✗ {fp.name}: {e}[/critical]")
+                    return r
+
+                futures = {executor.submit(scan_local, fp): fp for fp in js_files}
+                for future in as_completed(futures):
+                    results.append(future.result())
+                    progress.advance(task)
+
+        console.print()
+        report_path = build_report(results, output_dir)
+        console.print(f"\n  [info]★[/info]  Reporte guardado → [bold white]{report_path}[/bold white]\n")
+
+    # ── Resumen final con carpeta completa ───────────────────────────────
+    console.print(Panel(
+        f"[success]Scan completo[/success]\n"
+        f"[muted]Output → {output_dir.resolve()}[/muted]",
+        title="[info]Done[/info]",
+        expand=False,
+    ))
 
 
 # ─── CLI ─────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
-        description="JS-Pentest-Automator — Recon Mode v2.1",
+        description="JS-Pentest-Automator — Recon Mode v2.2",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     subparsers = parser.add_subparsers(dest="command")
 
     # Subcomando: recon (URL remota)
-    recon_parser = subparsers.add_parser("recon", help="Analizar URL remota")
+    recon_parser = subparsers.add_parser("recon", help="Analizar URL remota (Katana automático)")
     recon_parser.add_argument("url", help="URL objetivo (ej: https://www.target.com)")
     recon_parser.add_argument("-w", "--workers", type=int, default=MAX_WORKERS)
 
     # Subcomando: local (archivos locales)
-    local_parser = subparsers.add_parser("local", help="Analizar directorio local")
+    local_parser = subparsers.add_parser("local", help="Analizar directorio local de .js")
     local_parser.add_argument("path", help="Directorio con archivos .js")
     local_parser.add_argument("-w", "--workers", type=int, default=MAX_WORKERS)
 

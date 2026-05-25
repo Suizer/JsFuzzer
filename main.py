@@ -143,7 +143,8 @@ def process_single_js(url: str, output_dir: Path) -> FileResult:
             result.ast_method = "source_map"
 
         # ── Paso 4: Static Scan ──────────────────────────────────────────
-        findings = scanner.scan_file(file_path)
+        # Pass URL so route-dump parsers can identify sw.js / manifest.json by filename
+        findings = scanner.scan_file(file_path, url=url)
         result.findings = findings or []
         result.success = True
 

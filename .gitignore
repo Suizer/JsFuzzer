@@ -1,7 +1,16 @@
-# Ignorar una carpeta específica
+# ── Runtime output (scan results, session data, logs) ───────────────────────
+# JsFuzzer session data (real target JS / findings)
 output/
+# Saudit scan results and logs (if saudit is run from this directory)
+results/
+logs/
+# Ansible/deps installer cache
+cache/
+# Saudit presets / installed binaries (if saudit is run from this directory)
+presets/
+tools/
 
-# Recomendados para tu Mac y Python
+# ── Python / macOS ───────────────────────────────────────────────────────────
 .DS_Store
 __pycache__/
 *.pyc

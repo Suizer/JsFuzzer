@@ -25,6 +25,8 @@ from pathlib import Path
 import yaml
 from rich.console import Console
 
+from core.route_dump_parsers import detect_and_parse_route_dumps
+
 console = Console()
 
 # ─── Entropy helpers ──────────────────────────────────────────────────────────
@@ -110,7 +112,6 @@ _URL_NOISE_PATTERNS = re.compile(
     r"|addthis\.com/"
     r"|weibo\.com/share"
     r"|qzone\.qq\.com/"
-    r"|lidlplus\.com/"
     r")",
     re.IGNORECASE,
 )
@@ -317,7 +318,18 @@ class JScanner:
 
     # ─── Main Scanner ────────────────────────────────────────────────────
 
-    def scan_file(self, file_path: Path) -> list[dict]:
+    def scan_file(self, file_path: Path, url: str = "") -> list[dict]:
+        """Scan a single JS/JSON file.
+
+        Parameters
+        ----------
+        file_path : Path
+            Local path of the downloaded file.
+        url : str, optional
+            Original URL (used by route-dump parsers to identify
+            service workers / manifests by filename). Falls back to
+            ``file_path.name`` when empty.
+        """
         file_path = Path(file_path)
         try:
             content = file_path.read_text(encoding="utf-8", errors="replace")
@@ -336,6 +348,13 @@ class JScanner:
             findings.extend(self._scan_entropy(content, line_starts))
         findings.extend(self._scan_endpoints(content, line_starts))
         findings.extend(self._detect_frameworks(content))
+
+        # Structured route-dump parsers (Symfony FOSJsRoutingBundle, service
+        # workers, PWA manifests, webpack chunk maps, Module Federation).
+        # These extract endpoints that the generic regex extractor misses.
+        url_hint = url or file_path.name
+        findings.extend(detect_and_parse_route_dumps(content, url_hint))
+
         findings = self._deduplicate(findings)
         return findings
 
@@ -576,7 +595,10 @@ class JScanner:
                     endpoint_lines.add(line)
 
         for f in findings:
-            key = f"{f['type']}:{f['name']}:{f.get('line', '')}"
+            # Include `match` in the dedup key — type:name:line alone collapses
+            # legitimately distinct findings on the same line (e.g. ROUTE_DUMP
+            # parsers that emit many findings with line="N/A").
+            key = f"{f['type']}:{f['name']}:{f.get('line', '')}:{f.get('match', '')}"
             if key in seen:
                 continue
 
